@@ -93,15 +93,29 @@ function Player({ tracks, current, setCurrent }: { tracks: Track[]; current: Tra
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState(false);
   const [src, setSrc] = useState('');
+  const sourceRequestRef = useRef(0);
+  const sourceRetryRef = useRef(false);
+
+  const refreshSource = useCallback(async (track: Track) => {
+    const requestId = ++sourceRequestRef.current;
+    const { data, error } = await supabase.storage.from('songs').createSignedUrl(track.file_path, 86400);
+    if (error || !data?.signedUrl || requestId !== sourceRequestRef.current) return;
+    audioRef.current?.pause();
+    setSrc(data.signedUrl);
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    if (!current) { setSrc(''); setPlaying(false); return; }
-    supabase.storage.from('songs').createSignedUrl(current.file_path, 3600).then(({ data }) => { if (!cancelled && data?.signedUrl) setSrc(data.signedUrl); });
-    return () => { cancelled = true; };
-  }, [current]);
+    sourceRetryRef.current = false;
+    setProgress(0);
+    setDuration(0);
+    if (current) void refreshSource(current);
+  }, [current, refreshSource]);
 
-  useEffect(() => { if (src && audioRef.current) { audioRef.current.load(); audioRef.current.play().then(() => setPlaying(true)).catch(() => setPlaying(false)); } }, [src]);
+  useEffect(() => {
+    if (!src || !audioRef.current) return;
+    audioRef.current.load();
+    void audioRef.current.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+  }, [src]);
   const next = useCallback(() => {
     if (!tracks.length) return;
     const index = current ? tracks.findIndex((track) => track.id === current.id) : -1;
@@ -109,9 +123,22 @@ function Player({ tracks, current, setCurrent }: { tracks: Track[]; current: Tra
     setCurrent(tracks[nextIndex]);
   }, [current, setCurrent, shuffle, tracks]);
   const previous = () => { if (!tracks.length) return; const index = current ? tracks.findIndex((track) => track.id === current.id) : 0; setCurrent(tracks[(index - 1 + tracks.length) % tracks.length]); };
-  const toggle = () => { if (!audioRef.current) return; if (playing) audioRef.current.pause(); else audioRef.current.play(); setPlaying(!playing); };
+  const toggle = () => {
+    if (!audioRef.current) return;
+    if (playing) {
+      audioRef.current.pause();
+      return;
+    }
+    void audioRef.current.play().then(() => setPlaying(true)).catch(() => setPlaying(false));
+  };
+  const handleAudioError = () => {
+    if (!current || sourceRetryRef.current) { setPlaying(false); return; }
+    sourceRetryRef.current = true;
+    setSrc('');
+    void refreshSource(current).finally(() => { sourceRetryRef.current = false; });
+  };
   return <footer className="player-bar">
-    <audio ref={audioRef} src={src} onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)} onTimeUpdate={(e) => setProgress(e.currentTarget.currentTime)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={(event) => { if (repeat) { event.currentTarget.currentTime = 0; event.currentTarget.play(); } else next(); }} />
+    <audio ref={audioRef} src={src} loop={repeat} preload="metadata" onError={handleAudioError} onLoadedMetadata={(e) => setDuration(Number.isFinite(e.currentTarget.duration) ? e.currentTarget.duration : 0)} onTimeUpdate={(e) => setProgress(e.currentTarget.currentTime)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => { if (!repeat) next(); }} />
     <div className="now-playing">{current ? <><div className="mini-art"><Music2 size={18} /></div><div className="track-meta"><strong>{current.title}</strong><span>{current.artist}</span></div></> : <><div className="mini-art empty"><Headphones size={18} /></div><div className="track-meta"><strong>No track selected</strong><span>Choose something from your library</span></div></>}</div>
     <div className="transport"><div className="progress-row"><span>{formatTime(progress)}</span><input type="range" min="0" max={duration || 1} value={progress} onChange={(e) => { const value = Number(e.target.value); setProgress(value); if (audioRef.current) audioRef.current.currentTime = value; }} /><span>{formatTime(duration)}</span></div><div className="transport-buttons"><button aria-label="Shuffle" className={shuffle ? 'selected' : ''} onClick={() => setShuffle(!shuffle)}><Shuffle size={16} /></button><button aria-label="Previous" onClick={previous}><SkipBack size={18} fill="currentColor" /></button><button className="play-button" aria-label={playing ? 'Pause' : 'Play'} onClick={toggle} disabled={!current}>{playing ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" />}</button><button aria-label="Next" onClick={next}><SkipForward size={18} fill="currentColor" /></button><button aria-label="Repeat" className={repeat ? 'selected' : ''} onClick={() => setRepeat(!repeat)}><Repeat size={16} /></button></div></div>
     <div className="player-end"><button><MoreHorizontal size={20} /></button></div>
